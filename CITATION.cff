@@ -1,0 +1,9 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+authors:
+- family-names: Wang
+  given-names: Xinru
+  orcid: "https://orcid.org/0009-0006-3833-8199"
+title: "I Love You Just as Much: Emotional Valence and Composition in Owners’ Narratives About Dogs and Cats"
+version: 1.0.0
+url: "https://github.com/xrwangxr/pet-narrative-sentiment-analysis"
