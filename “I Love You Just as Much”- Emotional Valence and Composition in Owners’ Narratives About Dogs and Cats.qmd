@@ -1,0 +1,506 @@
+---
+title: '“I Love You Just as Much”: Emotional Valence and Composition in Owners’ Narratives About Dogs and Cats'
+author: "Xinru Wang"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+---
+
+```{r}
+#| label: setup-pet
+#| include: false
+
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Introduction
+
+Understanding how people talk about their pets provides insight into the emotional structure of human–animal relationships. Although growing research highlights the psychological importance of companion animals, less attention has been given to the emotional tone embedded in everyday narratives about different species. In particular, it remains unclear whether pet owners use distinct emotional language when discussing dogs compared to cats, who are among the most popular pet species.
+
+The present study analyzes whether the overall emotional tone of language differs when participants describe thier dogs verse thier cats. Using interview transcripts from a broader study of multispecies families, pet-related narrative segments were extracted and analyzed using lexicon-based sentiment analysis tools (e.g., `sentimentr`, `NRC Emotion Lexicon`). Sentiment scores were compared across species to assess whether systematic differences in emotional expression emerge.
+
+# Required Packages
+
+All data preparation, sentiment scoring, and statistical analyses were conducted in R. The following packages were used:
+
+```{r}
+#| label: libraries-pet
+#| message: false
+#| warning: false
+
+library(readxl)
+library(tidyverse)
+library(sentimentr)
+library(stringr)
+library(knitr)
+library(ggplot2)
+library(emmeans)
+library(tidytext)
+library(lme4)
+library(lmerTest)
+library(rcompanion)
+library(kableExtra)
+library(car)
+```
+
+# Data Preparation
+
+## Load and Setup Data
+
+```{r}
+#| label: load-pet
+
+pet_chunks <- read_csv("sentiment_analysis_raw.csv")
+```
+
+## Data Overview
+
+To provide context for the analyses, we first inspected the structure of the analytic dataset. Each row represented one pet-related narrative chunk extracted from an interview transcript. Because participants could contribute more than one chunk, some participants appeared in multiple rows. The dataset included variables such as participant ID, pet species, and the text of each extracted chunk.
+
+```{r}
+#| label: inspect-pet-data
+
+# inspect dataset structure (variables and data types)
+glimpse(pet_chunks)
+
+# count total number of unique participants
+pet_chunks %>%
+  summarise(n = n_distinct(participant_id)) %>%
+  pull(n)
+
+# count total number of chunks
+nrow(pet_chunks)
+
+# count total number of variables (columns)
+ncol(pet_chunks)
+```
+
+Overall, the analytic dataset contained `r n_distinct(pet_chunks$participant_id)` participants contributing `r nrow(pet_chunks)` chunks across `r ncol(pet_chunks)` variables.
+
+## Basic Descriptives
+
+We next described the analytic sample by grouping participants according to whether their pet-related chunks referred to only dogs, only cats, or both species.
+
+```{r}
+#| label: tbl-participant-species-groups
+#| tbl-cap: "Number of Participants by Pet Species Category"
+
+# classify participants into Dog Only, Cat Only, or Dog and Cat groups
+participant_groups <- pet_chunks %>%
+  distinct(participant_id, species) %>%  # retain one row per participant-species combination
+  group_by(participant_id) %>%
+  summarise(
+    # count the number of unique species each participant discussed
+    n_species = n_distinct(species),  
+    # assign each participant to a species category
+    group = case_when(
+      n_species == 2 ~ "Dog and Cat", # participant discussed both species  
+    "dog" %in% species ~ "Dog Only", # participant discussed only dogs
+    "cat" %in% species ~ "Cat Only", # participant discussed only cats
+      TRUE ~ NA_character_
+    ),
+    .groups = "drop"
+  ) %>%
+  # #table displays categories in a logical order
+  mutate(group = factor(group, levels = c("Dog Only", "Cat Only", "Dog and Cat"))) 
+
+# count the number of participants in each species category for the descriptive table
+participant_groups %>%
+  count(group) %>%
+  knitr::kable(
+    col.names = c("Pet Species Category", "Participants")
+  ) %>%
+  kableExtra::kable_styling(
+    full_width = FALSE,
+    position = "center"
+  )
+```
+
+The analytic sample consisted of `r n_distinct(pet_chunks$participant_id)` unique participants contributing a total of `r nrow(pet_chunks)` pet-related narrative chunks. Of these participants, `r sum(participant_groups$group == "Dog Only")` discussed only dogs, `r sum(participant_groups$group == "Cat Only")` discussed only cats, and `r sum(participant_groups$group == "Dog and Cat")` discussed both species. For participants who discussed both species, narrative segments were coded and analyzed at the chunk level, with each segment assigned to the species it referenced. Overall, most participants contributed narratives about only one species, whereas a smaller subset discussed both dogs and cats.
+
+Across all participants, the dataset included `r sum(pet_chunks$species == "dog")` dog-related chunks and `r sum(pet_chunks$species == "cat")` cat-related chunks.
+
+## Data Cleaning
+
+Next, the narrative text was cleaned and standardized prior to sentiment analysis.
+
+```{r}
+#| label: data-cleaning-pet
+
+pet_chunks <- pet_chunks %>%
+  mutate(clean_chunk = raw_chunk)
+
+pet_chunks <- pet_chunks %>%
+  mutate(
+    clean_chunk = clean_chunk %>%
+      str_remove_all("\\([^)]*\\)") %>%  # remove (laughs), (pause), etc.
+      str_replace_all("\\s+", " ") %>%   # replace extra spaces or line breaks with a single space
+      str_trim() %>% # remove extra spaces at the beginning and end of each chunk 
+      str_to_lower()) # convert text to lowercase to improve consistency for sentiment analysis
+
+# create a unique identifier for each chunk
+pet_chunks <- pet_chunks %>%
+  mutate(chunk_uid = paste(participant_id, chunk_id, sep = "_")) 
+
+```
+
+During data cleaning, bracketed notations (e.g., “(laughs)”) were removed, extra spaces and line breaks were standardized, and all text was converted to lowercase. A unique identifier was also created for each chunk to help tracking across analyses. The cleaned text was used in all subsequent sentiment analyses.
+
+# Sentiment Analysis
+
+## 1. Emotional Valence Analysis (`sentimentr`)
+
+In this section, chunk-level sentiment scores were calculated using the `sentimentr` package.
+
+```{r}
+#| label: tbl-polarity-pet
+#| tbl-cap: "Mean and Standard Deviation of Chunk-Level Sentiment Scores by Species"
+
+# calculating average sentiment score by unique id 
+chunk_sent <- sentiment_by(
+  pet_chunks$clean_chunk,
+  by = pet_chunks$chunk_uid)
+
+# checking column name in the sentiment output
+names(chunk_sent)
+
+# join sentiment score to main by chunk_uid
+pet_chunks <- pet_chunks %>%
+  left_join(chunk_sent, by = "chunk_uid")
+
+# calculate and display descriptive statistics (mean, SD, and sample size) for chunk-level sentiment scores by species.
+pet_chunks %>%
+  group_by(species) %>%
+  summarise(
+    mean_sentiment = round(mean(ave_sentiment), 3),
+    sd_sentiment = round(sd(ave_sentiment), 3),
+    n = n()
+  ) %>%
+  knitr::kable()
+```
+
+```{r}
+#| label: fig-sentiment-boxplot
+#| fig-cap: "Distribution of chunk-level sentiment scores by species. Points represent individual narrative chunks, and boxplots display the median and interquartile range of sentiment scores for cat and dog narratives." 
+
+ggplot(pet_chunks, aes(x = species, y = ave_sentiment, fill = species)) +
+  geom_boxplot(alpha = 0.6, outlier.shape = NA) +
+  geom_jitter(width = 0.2, alpha = 0.25) +
+  labs(
+    x = "Species",
+    y = "Sentiment Score"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "none")
+```
+
+Descriptive statistics indicated that the mean sentiment score for dog-related chunks was 0.114 (SD = 0.156, n = 369), whereas the mean sentiment score for cat-related chunks was 0.091 (SD = 0.162, n = 167), suggesting that dog-related narratives were, on average, slightly more positive than cat-related narratives.
+
+## 2. Emotion Category Analysis (NRC Lexicon)
+
+### a. Tokenization
+
+To examine discrete emotional categories, the cleaned text was tokenized and matched with the NRC emotion lexicon.
+
+```{r}
+#| label: tokenize-pet
+
+# 1. break each chunk into individual words while keeping the participant and chunk IDs
+tokens <- pet_chunks %>%
+  select(participant_id, chunk_uid, species, clean_chunk) %>%
+  unnest_tokens(word, clean_chunk)
+
+# 2. count the total number of words in each chunk (helps to adjust for chunk length in later analyses)
+chunk_total_words <- tokens %>%
+  count(participant_id, chunk_uid, species, name = "total_words")
+
+# 3. load the NRC emotion lexicon
+nrc <- get_sentiments("nrc")
+
+# 4. # inner_join keeps only tokens that appear in the NRC lexicon
+nrc_tokens <- tokens %>%
+  inner_join(nrc, by = "word", relationship = "many-to-many")
+
+# 5. focus on discrete emotions only (exclude positive/negative)
+nrc_discrete <- nrc_tokens %>%
+  filter(!sentiment %in% c("positive", "negative"))
+
+# 6.creates one row per chunk per emotion category
+chunk_emotion_counts <- nrc_discrete %>%
+  count(participant_id, chunk_uid, species, sentiment, name = "emotion_n") %>%
+  left_join(chunk_total_words, by = c("participant_id", "chunk_uid", "species"))
+```
+
+### b. Descriptive Emotion Distribution
+
+To explore the distribution of discrete emotional categories across species, the proportion of NRC emotion words was calculated separately for dog and cat narratives. **For each species, emotion counts were converted to proportions to account for differences in overall emotion word frequency.**       
+@fig-emotion-distribution presents the descriptive distribution of discrete emotions across species.
+
+```{r}
+#| label: fig-descriptive-distribution 
+#| fig-cap: "Distribution of NRC emotion categories by species, expressed as the proportion of emotion words within each species to account for differences in total emotion word frequency."
+
+# summarize the total number of emotion words for each emotion category within each species
+emotion_summary <- chunk_emotion_counts %>%
+  group_by(species, sentiment) %>%
+  summarise(total_emotion_words = sum(emotion_n), .groups = "drop")
+
+# convert raw counts to proportions within each species, which allows us to compare the relative distribution of emotions 
+emotion_summary_prop <- emotion_summary %>%
+  group_by(species) %>%
+  mutate(prop = total_emotion_words / sum(total_emotion_words))
+
+# create a bar plot showing the proportion of each emotion category by species
+ggplot(emotion_summary_prop,
+       aes(x = sentiment, y = prop, fill = species)) +
+  geom_col(position = "dodge") +
+  labs(x = "Emotion Category",
+       y = "Proportion of Emotion Words",
+       fill = "Species" 
+  ) +
+  scale_fill_manual(values = c("cat" = "darkorange",
+                                "dog" = "steelblue")) +
+  
+  theme_minimal()
+```
+
+```{r}
+emotion_summary_prop %>%
+  pivot_wider(names_from = species, values_from = prop)
+```
+
+**Interpretation**:
+
+As shown in @fig-descriptive-distribution, the overall pattern of discrete emotions was broadly similar across dog and cat narratives. Joy and trust emerged as the most frequent emotion categories for both species, whereas anger and disgust were relatively less common. Although minor visual differences were observed in certain categories (e.g., anticipation and surprise), the general distribution of emotions appeared comparable across species. Formal statistical tests were conducted to determine whether these observed differences were statistically meaningful.
+
+### c. Overall Emotion Distribution Across Pet Narratives
+
+Next, I analyzed the overall distribution of emotion categories across all pet-related narratives, regardless of species.
+
+```{r}
+#| label: fig-nrc-overall-emotions
+#| fig-cap: "Predicted emotion word rates across NRC emotion categories aggregated across all pet-related narrative chunks. Rates were estimated from a mixed-effects Poisson regression model with chunk length included as an offset and participant included as a random effect. Error bars represent 95% confidence intervals."
+
+m_nrc_overall <- glmer(
+  emotion_n ~ sentiment + (1 | participant_id),
+  offset = log(total_words),
+  family = poisson,
+  data = chunk_emotion_counts,
+  control = glmerControl(optimizer = "bobyqa")
+)
+
+summary(m_nrc_overall)
+
+Anova(m_nrc_overall, type = 3)
+
+# predicted emotion rates
+emm_overall <- emmeans(m_nrc_overall, ~ sentiment, type = "response")
+emm_overall_df <- as.data.frame(emm_overall)
+
+# plot
+ggplot(emm_overall_df, aes(x = sentiment, y = rate)) +
+  geom_point(size = 3, color = "steelblue") +
+  geom_errorbar(
+    aes(ymin = asymp.LCL, ymax = asymp.UCL),
+    width = 0.2,
+    color = "black"
+  ) +
+  labs(
+    x = "Emotion Category",
+    y = "Predicted Emotion Rate"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+**Interpretation**:
+The overall effect of emotion category was significant, indicating that some emotion categories appeared more frequently than others across pet-related narratives overall. As shown in @fig-nrc-overall-emotions, trust and joy showed the highest predicted emotion rates, followed by anticipation and sadness. In contrast, anger, disgust, fear, and surprise appeared less frequently. This pattern suggests that pet-related narratives were characterized primarily by positive and relationship-oriented emotional language, with relatively little negative emotional language used when participants discussed their pets.
+
+# Statistical Testing
+
+## 1. Emotional Valence Comparison (Chunk-Level Analysis)
+
+::: callout-note
+## Analytic Question
+
+Does the overall emotional tone differ when people talk about dogs versus cats?
+:::
+
+Since participants contributed multiple narrative chunks, a linear mixed-effects model was fitted to examine whether overall emotional valence differed between dog and cat narratives while accounting for clustering within participants. A random intercept for participant was included to allow each individual to vary in their baseline level of emotional tone.
+
+```{r}
+#| label: model-valence-chunk
+
+# fit linear mixed-effects model with participant as a random intercept
+m_chunks <- lmer(ave_sentiment ~ species + (1 | participant_id),
+              data = pet_chunks)
+# 1. ave_sentiment is the outcome variable (sentiment score for each chunk)
+# 2. species is the predictor (dog vs cat)
+# 3. (1 | participant_id) accounts for the fact that chunks are grouped within participants
+# 4. data = pet_chunks tells the model which dataset to use
+
+summary(m_chunks)
+```
+
+```{r}
+#| label: fig-model-predicted-sentiment
+#| fig-cap: "Model-predicted chunk-level sentiment scores by species from the linear mixed-effects model. Points represent estimated marginal means, and error bars represent 95% confidence intervals"
+
+# get predicted means from model
+emm <- emmeans(m_chunks, ~ species)
+
+# convert to dataframe
+emm_df <- as.data.frame(emm)
+
+# plot predicted means with confidence intervals
+ggplot(emm_df, aes(x = species, y = emmean, color = species)) +
+  geom_point(size = 3) +
+  geom_errorbar(aes(ymin = lower.CL, ymax = upper.CL), width = 0.2) +
+  labs(
+    x = "Species",
+    y = "Predicted Sentiment",
+    color = "Species"
+  ) +
+  scale_color_manual(values = c("cat" = "darkorange",
+                                "dog" = "steelblue")) +
+  theme_minimal()
+```
+
+**Interpretation**:
+
+A linear mixed-effects model was fitted to examine whether overall emotional valence differed by species while accounting for clustering of narrative chunks within participants. Species was not a significant predictor of valence, *b* = 0.024, *SE* = 0.015, *t* = 1.60, *p* = .12. Although dog-related chunks showed slightly higher average sentiment scores than cat-related chunks, this difference was small and not statistically significant after accounting for participant-level variation. These results suggest that the overall emotional tone of narratives did not differ reliably between dogs and cats.
+
+## Robustness Check: Sentence-Level Analysis
+
+As a robustness check, emotional valence was reanalyzed at the sentence level to determine whether the findings were sensitive to the choice of chunk segmentation. A linear mixed-effects model was again used to account for clustering of sentences within participants.
+
+```{r}
+#| label: robust-valence-sentence
+
+# split each cleaned chunk into individual sentences (this creates a new dataset where each row represents one sentence)
+pet_sentences <- pet_chunks %>%
+  unnest_tokens(sentence, clean_chunk, token = "sentences") %>%
+  mutate(sentence_uid = row_number()) # assign a unique ID to each sentence
+
+# calculates an average sentiment score for each sentence
+sentence_sent <- sentiment_by(pet_sentences$sentence, by = pet_sentences$sentence_uid)
+
+# merge sentence-level sentiment scores back into the dataset
+pet_sentences <- pet_sentences %>%
+  left_join(
+    sentence_sent %>%
+      select(sentence_uid, ave_sentiment),
+    by = "sentence_uid",
+    suffix = c("", "_sentence")
+  )
+
+# rename the sentiment variable for clarity
+pet_sentences <- pet_sentences %>%
+  rename(sentence_sentiment = ave_sentiment_sentence)
+
+
+m_sentences <- lmer(
+  sentence_sentiment ~ species + (1 | participant_id) + (1 | chunk_uid),
+  data = pet_sentences
+)
+# Fixed effect: species (dog vs. cat)
+# Random intercepts: participant_id (accounts for repeated participants)
+#                    chunk_uid (accounts for sentences nested within chunks)
+
+summary(m_sentences)
+
+# confidence intervals
+confint(m_sentences)
+```
+
+```{r}
+#| label: fig-model-predicted-sentiment-sentence
+#| fig-cap: "Model-predicted sentence-level sentiment scores by species from the linear mixed-effects model. Points represent estimated marginal means, and error bars represent 95% confidence intervals."
+
+emm_sentence <- emmeans(m_sentences, ~ species)
+emm_sentence_df <- as.data.frame(emm_sentence)
+
+ggplot(emm_sentence_df, aes(x = species, y = emmean, color = species)) +
+  geom_point(size = 3) +
+  geom_errorbar(aes(ymin = lower.CL, ymax = upper.CL), width = 0.2) +
+  labs(
+    x = "Species",
+    y = "Predicted Sentiment", 
+    color = "Species"
+  ) +
+  scale_color_manual(values = c("cat" = "darkorange",
+                                "dog" = "steelblue")) +
+  theme_minimal()
+```
+
+**Interpretation**:
+
+Consistent with the chunk-level analysis, a sentence-level linear mixed-effects model revealed no significant effect of species on sentiment, *b* = 0.014, *SE* = 0.015, *t* = 0.91, *p* = 0.38. The 95% confidence interval for the species effect included zero \[−0.016, 0.044\], indicating no reliable difference in emotional tone between dog and cat narratives at the sentence level. These findings suggest that emotional valence did not meaningfully differ when participants discussed dogs versus cats at the sentence level.
+
+## 2. Emotion Category Comparison (Chunk-Level Analysis)
+
+Extending the valence analysis to examine discrete emotion categories, a generalized linear mixed-effects model with a Poisson link was fitted to test whether emotion rates differed by species.
+
+::: callout-note
+## Analytic Question
+
+Are certain emotions used more often when people talk about dogs compared to cats?
+:::
+
+```{r}
+#| label: model-nrc-chunk
+
+m_nrc <- glmer(
+  emotion_n ~ species * sentiment + (1 | participant_id),
+  offset = log(total_words),
+  family = poisson,
+  data = chunk_emotion_counts,
+  control = glmerControl(optimizer = "bobyqa")
+)
+# 1. emotion_n is the outcome variable (number of emotion words in each chunk)
+# 2. species and sentiment are the predictors (dog vs cat, and emotion category)
+# 3. species * sentiment tests whether emotion categories differ by species
+# 4. (1 | participant_id) accounts for chunks being grouped within participants
+# 5. offset = log(total_words) adjusts for differences in chunk length
+# 6. family = poisson is used because the outcome is a count variable
+# 7. data = chunk_emotion_counts tells the model which dataset to use
+
+summary(m_nrc)
+```
+
+```{r}
+#| label: fig-model-nrc-chunk
+#| fig-cap: "Model-predicted emotion rates by species and emotion category from the Poisson mixed-effects model. Points represent estimated marginal means on the response scale, and error bars represent 95% confidence intervals."
+
+# get model-predicted emotion rates on the response scale
+emm_nrc <- emmeans(m_nrc, ~ species | sentiment, type = "response")
+
+# convert to dataframe
+emm_nrc_df <- as.data.frame(emm_nrc)
+
+# plot predicted rates by emotion category and species
+ggplot(emm_nrc_df, aes(x = sentiment, y = rate, color = species, group = species)) +
+  geom_point(position = position_dodge(width = 0.4), size = 3) +
+  geom_errorbar(
+    aes(ymin = asymp.LCL, ymax = asymp.UCL),
+    position = position_dodge(width = 0.4),
+    width = 0.2
+  ) +
+  labs(
+    x = "Emotion Category",
+    y = "Predicted Emotion Rate",
+    color = "Species"
+  ) +
+  scale_color_manual(values = c("cat" = "darkorange", "dog" = "steelblue")) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+**Interpretation**:
+
+A Poisson generalized linear mixed-effects model indicated that the frequency of emotion-related words did not differ between dog- and cat-related narratives after accounting for chunk length and participant-level clustering, *b* = 0.081, *SE* = 0.125, *z* = 0.65, *p* = .51. Although some emotion categories occurred more frequently than others overall, the interaction between species and emotion category was not significant, suggesting that the emotional profiles of language used to describe dogs and cats were similar.
+
+
+# Discussion
+
+Across both analytic approaches, species was not a reliable predictor of emotional language. The chunk-level and sentence-level analyses revealed no significant differences in overall emotional valence between dog and cat narratives. Similarly, although discrete emotion categories varied in overall frequency, the generalized linear mixed-effects model indicated that the distribution of specific emotion types did not meaningfully differ by species after accounting for participant-level clustering and chunk length. Together, these findings suggest that participants expressed comparable emotional tone and emotion profiles when discussing dogs and cats.
