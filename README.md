@@ -49,4 +49,4 @@ Full manuscript is currently withheld pending future publication.
 
 ## Citation
 
-pending
+[![DOI](https://zenodo.org/badge/1242920315.svg)](https://doi.org/10.5281/zenodo.20347460)
